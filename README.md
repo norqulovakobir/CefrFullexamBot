@@ -1,50 +1,96 @@
-# Telegram Bot with Webhook
+# Telegram Subscription Bot
 
-## Setup
+Node.js da yozilgan Telegram bot majburiy kanal obunasi bilan. Localda polling, serverda webhook rejimida ishlaydi.
 
-1. **Install dependencies:**
-   ```bash
-   npm install
-   ```
+## Xususiyatlari
 
-2. **Configure bot:**
-   - Update `BOT_TOKEN` with your actual bot token
-   - Update `CHANNEL_USERNAME` with your channel username (without @)
-   - Update `WEBHOOK_URL` with your domain URL
+- ✅ Majburiy kanal obunasi tekshiruvi
+- 📝 Test topshirish uchun mini-app (Web App)
+- 🔗 Dostlarga ulashish funksiyasi
+- 👨‍💻 Admin bilan bog'lanish
+- 🎨 Chiroyli va zamonaviy interfeys
+- 🔄 Dual mode: Polling (local) + Webhook (server)
+- 🔐 Environment variables bilan xavfsizlik
 
-3. **For local development:**
-   - Install ngrok: `npm install -g ngrok`
-   - Run ngrok: `ngrok http 3000`
-   - Copy the ngrok URL and update `WEBHOOK_URL`
-   - Uncomment the ngrok line and comment the domain line
+## O'rnatish
 
-4. **Run the bot:**
-   ```bash
-   npm start
-   ```
+1. Paketlarni o'rnatish:
+```bash
+npm install
+```
 
-## Webhook Configuration
+2. Environment variables sozlash:
+```bash
+cp .env.example .env
+```
 
-The bot now uses webhook instead of polling:
-- More reliable than polling
-- Instant message processing
-- Better for production
+`.env` fayliga o'zingizning ma'lumotlaringizni kiriting:
+```
+BOT_TOKEN=your_bot_token_here
+CHANNEL_USERNAME=@your_channel
+ADMIN_NAME=Your Name
+ADMIN_PHONE=+998901234567
+ADMIN_TELEGRAM=https://t.me/your_username
+WEBHOOK_URL=https://your-app.onrender.com/webhook
+PORT=3000
+NODE_ENV=development  # local uchun, serverda "production"
+```
 
-## Features
+## Ishga tushurish
 
-- Channel subscription check
-- Main menu with web app buttons
-- Share functionality
-- Help command
-- Express server for webhook
+### Local development (Polling mode):
+```bash
+npm start
+```
 
-## Environment Variables
+### Server deployment (Webhook mode):
+Render yoki boshqa platformaga yuklashdan oldin:
+1. `NODE_ENV=production` deb o'rnating
+2. `WEBHOOK_URL` ni to'g'ri kiriting
+3. Platformaning portidan foydalaning (odatda `process.env.PORT`)
 
-- `PORT`: Server port (default: 3000)
+## Rejimlar
 
-## Deployment
+### 🏠 Local (Polling)
+- `NODE_ENV=development`
+- Bot polling orqali ishlaydi
+- Test va development uchun qulay
 
-For production:
-1. Deploy to a server with HTTPS
-2. Update `WEBHOOK_URL` to your server URL
-3. Ensure your server is accessible from the internet
+### 🌐 Server (Webhook)
+- `NODE_ENV=production`
+- Avtomatik webhook o'rnatiladi
+- Render/Heroku/Vercel kabi platformalar uchun
+- Health check endpoint: `/health`
+
+## Render uchun sozlash
+
+1. Repositoryni GitHub'ga yuklang
+2. Render.com da "New Web Service" yarating
+3. Build Command: `npm install`
+4. Start Command: `npm start`
+5. Environment Variables qo'shing:
+   - `NODE_ENV=production`
+   - `BOT_TOKEN=your_token`
+   - `CHANNEL_USERNAME=@your_channel`
+   - `WEBHOOK_URL=https://your-app.onrender.com/webhook`
+   - Boshqa kerakli variables
+
+## Bot funksiyalari
+
+1. **Start komandasi** - Foydalanuvchi startni bossa, kanalga obuna bo'lish taklif qilinadi
+2. **Obuna tekshiruvi** - Kanalga obuna bo'lish tekshiriladi
+3. **Asosiy menyu** - Obuna tasdiqlangach asosiy menyu ochiladi:
+   - 📝 Testni topshirish (Mini-app)
+   - 🔗 Dostlarga ulashish
+   - 👨‍💻 Admin bilan bog'lanish
+
+## API Endpoints
+
+- `POST /webhook` - Telegram webhook (faqat production mode)
+- `GET /health` - Server holatini tekshirish
+
+## Xavfsizlik
+
+- Barcha敏感 ma'lumotlar `.env` faylda saqlanadi
+- `.gitignore` ga `.env` qo'shilgan
+- Environment variables orqali konfiguratsiya

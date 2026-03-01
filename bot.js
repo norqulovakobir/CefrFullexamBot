@@ -1,440 +1,784 @@
+require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const express = require('express');
-require('dotenv').config();
+const axios = require('axios');
+const fs = require('fs');
 
-// Environment variables validation
-const requiredEnvVars = ['BOT_TOKEN', 'BASE_URL'];
-const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
-
-if (missingEnvVars.length > 0) {
-  console.error('❌ Missing required environment variables:', missingEnvVars.join(', '));
-  process.exit(1);
-}
-
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const BASE_URL = process.env.BASE_URL;
-const PORT = process.env.PORT || 3000;
+// Environment variables
+const TOKEN = process.env.BOT_TOKEN;
 const CHANNEL_USERNAME = process.env.CHANNEL_USERNAME;
-const FULL_EXAM_URL = process.env.FULL_EXAM_URL;
-const SPEAKING_URL = process.env.SPEAKING_URL;
-const WRITING_URL = process.env.WRITING_URL;
-const ADMIN_URL = process.env.ADMIN_URL;
-const TEST_URL = process.env.TEST_URL;
-const BOT_USERNAME = process.env.BOT_USERNAME;
+const WEBHOOK_URL = process.env.WEBHOOK_URL;
+const PORT = process.env.PORT || 3000;
+const NODE_ENV = process.env.NODE_ENV || 'development';
 
-// Initialize Express app
+// Mini app URLs from environment
+const TEST_APP_URL = process.env.TEST_APP_URL || 'https://test.com';
+const WRITINGLAP_URL = process.env.WRITINGLAP_URL || 'https://writinglap.com';
+const SPEAKLAP_URL = process.env.SPEAKLAP_URL || 'https://speaklap.com';
+
+// Admin information from environment
+const ADMIN_INFO = {
+    name: process.env.ADMIN_NAME || 'Admin',
+    phone: process.env.ADMIN_PHONE || '+998000000000',
+    telegram: process.env.ADMIN_TELEGRAM || 'https://t.me/admin'
+};
+
+// Validate required environment variables
+if (!TOKEN) {
+    console.error('❌ BOT_TOKEN topilmadi! .env faylini tekshiring.');
+    process.exit(1);
+}
+
+// Create Express app for webhook
 const app = express();
-app.use(express.json());
 
-// Webhook path configuration
-const WEBHOOK_PATH = `/webhook/${BOT_TOKEN}`;
-const WEBHOOK_URL = `${BASE_URL}${WEBHOOK_PATH}`;
+// Use webhook in production, polling in development
+const bot = NODE_ENV === 'production' 
+    ? new TelegramBot(TOKEN) 
+    : new TelegramBot(TOKEN, { polling: true });
 
-// Initialize Telegram bot with webhook
-const bot = new TelegramBot(BOT_TOKEN, { webHook: true });
+// Referral system
+const REFERRAL_FILE = './referrals.json';
 
-// Setup webhook after server starts
-async function setupWebhook() {
-  try {
-    const webhookInfo = await bot.getWebHookInfo();
+// Load referrals data
+function loadReferrals() {
+    try {
+        if (fs.existsSync(REFERRAL_FILE)) {
+            return JSON.parse(fs.readFileSync(REFERRAL_FILE, 'utf8'));
+        }
+    } catch (error) {
+        console.error('Referral faylini o\'qishda xatolik:', error);
+    }
+    return {};
+}
+
+// Save referrals data
+function saveReferrals(data) {
+    try {
+        fs.writeFileSync(REFERRAL_FILE, JSON.stringify(data, null, 2));
+    } catch (error) {
+        console.error('Referral faylini saqlashda xatolik:', error);
+    }
+}
+
+// Generate referral link
+function generateReferralLink(userId) {
+    return `https://t.me/${(bot.getMe()).then(bot => bot.username)}?start=${userId}`;
+}
+
+// Check if user has invited 5 people to the channel
+async function checkInvitationRequirement(userId) {
+    try {
+        const referrals = loadReferrals();
+        const userReferrals = referrals[userId] || [];
+        
+        // Check each referred user if they are actually subscribed to the channel
+        let validReferrals = 0;
+        for (const referredUserId of userReferrals) {
+            try {
+                const chatMember = await bot.getChatMember(CHANNEL_USERNAME, referredUserId);
+                if (['member', 'administrator', 'creator'].includes(chatMember.status)) {
+                    validReferrals++;
+                }
+            } catch (error) {
+                // User not in channel or blocked
+            }
+        }
+        
+        return validReferrals >= 7;
+    } catch (error) {
+        console.error('Invitation tekshirishda xatolik:', error.message);
+        return false;
+    }
+}
+
+// Get user referral count
+async function getUserReferralCount(userId) {
+    try {
+        const referrals = loadReferrals();
+        const userReferrals = referrals[userId] || [];
+        
+        let validReferrals = 0;
+        for (const referredUserId of userReferrals) {
+            try {
+                const chatMember = await bot.getChatMember(CHANNEL_USERNAME, referredUserId);
+                if (['member', 'administrator', 'creator'].includes(chatMember.status)) {
+                    validReferrals++;
+                }
+            } catch (error) {
+                // User not in channel or blocked
+            }
+        }
+        
+        return validReferrals;
+    } catch (error) {
+        console.error('Referral count olishda xatolik:', error.message);
+        return 0;
+    }
+}
+
+// Add referral
+function addReferral(referrerId, referredId) {
+    const referrals = loadReferrals();
     
-    // Only set webhook if it's different from current
-    if (webhookInfo.url !== WEBHOOK_URL) {
-      await bot.setWebHook(WEBHOOK_URL);
-      console.log(`✅ Webhook updated: ${WEBHOOK_URL.replace(BOT_TOKEN, '***')}`);
-    } else {
-      console.log('✅ Webhook already configured correctly');
+    if (!referrals[referrerId]) {
+        referrals[referrerId] = [];
     }
-  } catch (error) {
-    console.error('❌ Failed to setup webhook:', error.message);
-    process.exit(1);
-  }
+    
+    if (!referrals[referrerId].includes(referredId)) {
+        referrals[referrerId].push(referredId);
+        saveReferrals(referrals);
+        return true;
+    }
+    
+    return false;
 }
 
-// Webhook endpoint
-app.post(WEBHOOK_PATH, (req, res) => {
-  try {
-    bot.processUpdate(req.body);
-    res.sendStatus(200);
-  } catch (error) {
-    console.error('❌ Error processing update:', error);
-    res.sendStatus(500);
-  }
-});
-
-// Health check endpoints
-app.get('/', (req, res) => {
-  res.json({ 
-    status: 'OK', 
-    message: 'Telegram Bot is running with webhook!',
-    timestamp: new Date().toISOString()
-  });
-});
-
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
-    timestamp: new Date().toISOString()
-  });
-});
-
-// Webhook info endpoint (debug)
-app.get('/webhook-info', async (req, res) => {
-  try {
-    const info = await bot.getWebHookInfo();
-    // Hide token in response
-    const safeInfo = {
-      ...info,
-      url: info.url.replace(BOT_TOKEN, '***')
-    };
-    res.json(safeInfo);
-  } catch (error) {
-    console.error('❌ Error getting webhook info:', error);
-    res.status(500).json({ error: 'Failed to get webhook info' });
-  }
-});
-
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error('❌ Express error:', err);
-  res.status(500).json({ error: 'Internal server error' });
-});
-
-// 404 handler
-app.use((req, res) => {
-  res.status(404).json({ error: 'Not found' });
-});
-
-// Start server
-app.listen(PORT, async () => {
-  console.log(`🚀 Server started on port ${PORT}`);
-  console.log(`📡 Webhook mode enabled`);
-  
-  // Setup webhook after server is ready
-  await setupWebhook();
-  
-  console.log('🤖 Bot is ready to receive updates');
-});
-
-// Graceful shutdown
-process.on('SIGTERM', async () => {
-  console.log('🔄 SIGTERM received, shutting down gracefully...');
-  try {
-    await bot.deleteWebHook();
-    console.log('✅ Webhook deleted');
-    process.exit(0);
-  } catch (error) {
-    console.error('❌ Error during shutdown:', error);
-    process.exit(1);
-  }
-});
-
-process.on('SIGINT', async () => {
-  console.log('🔄 SIGINT received, shutting down gracefully...');
-  try {
-    await bot.deleteWebHook();
-    console.log('✅ Webhook deleted');
-    process.exit(0);
-  } catch (error) {
-    console.error('❌ Error during shutdown:', error);
-    process.exit(1);
-  }
-});
-
-// ─────────────────────────────────────────
-// HELPER FUNCTIONS
-// ─────────────────────────────────────────
-
+// Check if user is subscribed to channel
 async function checkSubscription(userId) {
-  try {
-    if (!CHANNEL_USERNAME || CHANNEL_USERNAME === 'your_channel') {
-      return true;
+    try {
+        const chatMember = await bot.getChatMember(CHANNEL_USERNAME, userId);
+        return ['member', 'administrator', 'creator'].includes(chatMember.status);
+    } catch (error) {
+        if (error.response && error.response.body.error_code === 400) {
+            console.log(`⚠️ Foydalanuvchi ${userId} kanalda a'zo emas yoki kanal topilmadi`);
+        } else if (error.response && error.response.body.error_code === 403) {
+            console.log(`🚫 Bot ${CHANNEL_USERNAME} kanaliga a'zo emas`);
+        } else {
+            console.error('Obunani tekshirishda xatolik:', error.message);
+        }
+        return false;
     }
-    const chatMember = await bot.getChatMember(CHANNEL_USERNAME, userId);
-    return chatMember.status !== 'left' && chatMember.status !== 'kicked';
-  } catch (error) {
-    console.error('❌ Error checking subscription:', error.message);
-    return true; // Allow access if check fails
-  }
 }
 
-function getReplyKeyboard() {
-  return {
-    reply_markup: {
-      keyboard: [
-        ['🧪 Testni boshlash', '🗣️ Speaking'],
-        ['✍️ Writing', '📚 Full Exam'],
-        ["👨‍💻 Admin bilan bog'lanish", '🔗 Dostlarga ulashish'],
-        ['❓ Yordam']
-      ],
-      resize_keyboard: true,
-      one_time_keyboard: false
+// Send subscription message
+async function sendSubscriptionMessage(chatId) {
+    try {
+        const keyboard = {
+            inline_keyboard: [[
+                {
+                    text: '📺 Kanalga obuna bo\'lish',
+                    url: `https://t.me/${CHANNEL_USERNAME.replace('@', '')}`
+                },
+                {
+                    text: '✅ Obunani tekshirish',
+                    callback_data: 'check_subscription'
+                }
+            ]]
+        };
+
+        await bot.sendMessage(chatId, 
+            `👋 Assalomu alaykum!\n\n` +
+            `Botdan to'liq foydalanish uchun quyidagi kanalga obuna bo'lishingiz shart:\n\n` +
+            `📺 *${CHANNEL_USERNAME}*\n\n` +
+            `Obuna bo'lgach, "Obunani tekshirish" tugmasini bosing!`, 
+            {
+                parse_mode: 'Markdown',
+                reply_markup: {
+                    keyboard: [
+                        [
+                            {
+                                text: '📺 Kanalga obuna bo\'lish',
+                                url: `https://t.me/${CHANNEL_USERNAME.replace('@', '')}`
+                            },
+                            {
+                                text: '✅ Obunani tekshirish',
+                                callback_data: 'check_subscription'
+                            }
+                        ]
+                    ],
+                    resize_keyboard: true,
+                    one_time_keyboard: false
+                }
+            }
+        );
+    } catch (error) {
+        if (error.response && error.response.body.error_code === 403) {
+            console.log(`🚫 Foydalanuvchi ${chatId} botni bloklagan`);
+        } else {
+            console.error('Xatolik (sendSubscriptionMessage):', error.message);
+        }
     }
-  };
 }
 
-// ─────────────────────────────────────────
-// COMMAND HANDLERS
-// ─────────────────────────────────────────
-
-bot.onText(/\/start/, async (msg) => {
-  const chatId = msg.chat.id;
-  const userId = msg.from.id;
-
-  try {
-    const isSubscribed = await checkSubscription(userId);
-
-    if (!isSubscribed) {
-      await bot.sendMessage(chatId,
-        `🚀 *Botdan to'liq foydalanish uchun kanalga obuna bo'ling!*\n\n` +
-        `📢 Quyidagi tugmani bosib kanalga obuna bo'ling va keyin /start ni qayta bosing`,
-        {
-          parse_mode: 'Markdown',
-          reply_markup: {
+// Send main menu
+async function sendMainMenu(chatId) {
+    try {
+        // Check invitation requirement
+        const hasInvitedEnough = await checkInvitationRequirement(chatId);
+        const referralCount = await getUserReferralCount(chatId);
+        const botInfo = await bot.getMe();
+        const referralLink = `https://t.me/${botInfo.username}?start=${chatId}`;
+        
+        const keyboard = {
             inline_keyboard: [
-              [{ text: `📺 Kanalga obuna bo'lish`, url: `https://t.me/${CHANNEL_USERNAME}` }]
+                [
+                    {
+                        text: '📝 Testni topshirish',
+                        web_app: { url: 'https://test.com' }
+                    }
+                ],
+                [
+                    {
+                        text: '🔗 Dostlarga ulashish',
+                        callback_data: 'share_bot'
+                    }
+                ],
+                [
+                    {
+                        text: `✍️ Writinglap ${hasInvitedEnough ? '' : '🔒'}`,
+                        web_app: hasInvitedEnough ? { url: WRITINGLAP_URL } : undefined,
+                        callback_data: hasInvitedEnough ? undefined : 'writinglap_status'
+                    }
+                ],
+                [
+                    {
+                        text: `🎤 Speaklap ${hasInvitedEnough ? '' : '🔒'}`,
+                        web_app: hasInvitedEnough ? { url: SPEAKLAP_URL } : undefined,
+                        callback_data: hasInvitedEnough ? undefined : 'speaklap_status'
+                    }
+                ],
+                [
+                    {
+                        text: '👨‍💻 Admin bilan bog\'lanish',
+                        callback_data: 'contact_admin'
+                    }
+                ]
             ]
-          }
-        }
-      );
-    } else {
-      await bot.sendMessage(chatId,
-        `🎉 *Xush kelibsiz!*\n\n` +
-        `👇 Quyidagi bo'limlardan birini tanlang:`,
-        {
-          parse_mode: 'Markdown',
-          ...getReplyKeyboard()
-        }
-      );
-    }
-  } catch (error) {
-    console.error('❌ Error in /start command:', error.message);
-    await bot.sendMessage(chatId, '👋 Salom! Bot ishga tushdi. /help yordam uchun.');
-  }
-});
+        };
 
+        const menuText = hasInvitedEnough 
+            ? `🎉 Tabriklayman! Endi botning barcha imkoniyatlaridan foydalanishingiz mumkin:\n\n` +
+              `📝 *Testni topshirish* - Test topshirish uchun mini-ilovani ochish\n` +
+              `🔗 *Dostlarga ulashish* - Botni do'stlaringizga ulashish\n` +
+              `🔗 *Referral link* - Do'stlaringizni taklif qiling\n` +
+              `✍️ *Writinglap* - Yozish mahoratini oshirish\n` +
+              `🎤 *Speaklap* - Speaking mahoratini oshirish\n` +
+              `👨‍💻 *Admin bilan bog'lanish* - Admin bilan bog'lanish\n\n` +
+              `📊 *Sizning takliflaringiz:* ${referralCount}/5 ✅`
+            : `🎉 Tabriklayman! Endi botning barcha imkoniyatlaridan foydalanishingiz mumkin:\n\n` +
+              `📝 *Testni topshirish* - Test topshirish uchun mini-ilovani ochish\n` +
+              `🔗 *Dostlarga ulashish* - Botni do'stlaringizga ulashish\n` +
+              `🔗 *Referral link* - Do'stlaringizni taklif qiling\n` +
+              `✍️ *Writinglap* - Yozish mahoratini oshirish (${7 - referralCount} ta taklif kerak)\n` +
+              `🎤 *Speaklap* - Speaking mahoratini oshirish (${7 - referralCount} ta taklif kerak)\n` +
+              `👨‍💻 *Admin bilan bog'lanish* - Admin bilan bog'lanish\n\n` +
+              `📊 *Sizning takliflaringiz:* ${referralCount}/7\n` +
+              `🎯 *Qolgan:* ${7 - referralCount} ta\n\n` +
+              `🔒 *Writinglap va Speaklapni ochish uchun @studyneedfuture kanaliga 7 ta inson taklif qiling!*`;
+
+        await bot.sendMessage(chatId, menuText, 
+            {
+                parse_mode: 'Markdown',
+                reply_markup: {
+                    inline_keyboard: [
+                        [
+                            {
+                                text: '📝 Testni topshirish',
+                                web_app: { url: TEST_APP_URL }
+                            }
+                        ],
+                        [
+                            {
+                                text: '🔗 Dostlarga ulashish',
+                                callback_data: 'share_bot'
+                            }
+                        ],
+                        [
+                            {
+                                text: `✍️ Writinglap ${hasInvitedEnough ? '' : '🔒'}`,
+                                web_app: hasInvitedEnough ? { url: WRITINGLAP_URL } : undefined,
+                                callback_data: hasInvitedEnough ? undefined : 'writinglap_status'
+                            }
+                        ],
+                        [
+                            {
+                                text: `🎤 Speaklap ${hasInvitedEnough ? '' : '🔒'}`,
+                                web_app: hasInvitedEnough ? { url: SPEAKLAP_URL } : undefined,
+                                callback_data: hasInvitedEnough ? undefined : 'speaklap_status'
+                            }
+                        ],
+                        [
+                            {
+                                text: '👨‍💻 Admin bilan bog\'lanish',
+                                callback_data: 'contact_admin'
+                            }
+                        ]
+                    ]
+                }
+            }
+        );
+    } catch (error) {
+        if (error.response && error.response.body.error_code === 403) {
+            console.log(`🚫 Foydalanuvchi ${chatId} botni bloklagan`);
+        } else {
+            console.error('Xatolik (sendMainMenu):', error.message);
+        }
+    }
+}
+
+// Handle /help command
 bot.onText(/\/help/, async (msg) => {
-  const chatId = msg.chat.id;
-  try {
-    await bot.sendMessage(chatId,
-      `🤖 *Bot haqida ma'lumot*\n\n` +
-      `Bu bot sizga quyidagi imkoniyatlarni beradi:\n\n` +
-      `🧪 *Testni boshlash* - Testlar yechish\n` +
-      `🗣️ *Speaking* - Gapirish mashqlari\n` +
-      `✍️ *Writing* - Yozish mashqlari\n` +
-      `📚 *Full Exam* - To'liq imtihonlar\n` +
-      `👨‍💻 *Admin* - Admin bilan bog'lanish\n` +
-      `🔗 *Ulashish* - Dostlarga ulashish\n\n` +
-      `Botdan foydalanish uchun avval kanalga obuna bo'ling!`,
-      { parse_mode: 'Markdown' }
-    );
-  } catch (error) {
-    console.error('❌ Error in /help command:', error.message);
-    await bot.sendMessage(chatId, '🤖 Bot haqida ma\'lumot: /start dan foydalaning!');
-  }
-});
-
-// ─────────────────────────────────────────
-// REPLY KEYBOARD HANDLERS
-// ─────────────────────────────────────────
-
-bot.onText(/🧪 Testni boshlash/, async (msg) => {
-  const chatId = msg.chat.id;
-  try {
-    await bot.sendMessage(chatId,
-      '🧪 *Test bo\'limi*\n\nTest uchun mini app ochilmoqda...',
-      { parse_mode: 'Markdown' }
-    );
-    await bot.sendMessage(chatId, '📱 Testni boshlash:', {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: '🧪 Testni ochish', web_app: { url: TEST_URL } }]
-        ]
-      }
-    });
-  } catch (error) {
-    console.error('❌ Error in test handler:', error.message);
-    await bot.sendMessage(chatId, '❌ Testni ochishda xatolik yuz berdi. Iltimos, qayta urinib ko\'ring.');
-  }
-});
-
-bot.onText(/🗣️ Speaking/, async (msg) => {
-  const chatId = msg.chat.id;
-  try {
-    await bot.sendMessage(chatId,
-      '🗣️ *Speaking bo\'limi*\n\nGapirish mashqlari uchun mini app ochilmoqda...',
-      { parse_mode: 'Markdown' }
-    );
-    await bot.sendMessage(chatId, '📱 Speakingni ochish:', {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: '🗣️ Speakingni ochish', web_app: { url: SPEAKING_URL } }]
-        ]
-      }
-    });
-  } catch (error) {
-    console.error('❌ Error in speaking handler:', error.message);
-    await bot.sendMessage(chatId, '❌ Speakingni ochishda xatolik yuz berdi. Iltimos, qayta urinib ko\'ring.');
-  }
-});
-
-bot.onText(/✍️ Writing/, async (msg) => {
-  const chatId = msg.chat.id;
-  try {
-    await bot.sendMessage(chatId,
-      '✍️ *Writing bo\'limi*\n\nYozish mashqlari uchun mini app ochilmoqda...',
-      { parse_mode: 'Markdown' }
-    );
-    await bot.sendMessage(chatId, '📱 Writingni ochish:', {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: '✍️ Writingni ochish', web_app: { url: WRITING_URL } }]
-        ]
-      }
-    });
-  } catch (error) {
-    console.error('❌ Error in writing handler:', error.message);
-    await bot.sendMessage(chatId, '❌ Writingni ochishda xatolik yuz berdi. Iltimos, qayta urinib ko\'ring.');
-  }
-});
-
-bot.onText(/📚 Full Exam/, async (msg) => {
-  const chatId = msg.chat.id;
-  try {
-    await bot.sendMessage(chatId,
-      '📚 *Full Exam bo\'limi*\n\nTo\'liq imtihonlar uchun mini app ochilmoqda...',
-      { parse_mode: 'Markdown' }
-    );
-    await bot.sendMessage(chatId, '📱 Full Examni ochish:', {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: '📚 Full Examni ochish', web_app: { url: FULL_EXAM_URL } }]
-        ]
-      }
-    });
-  } catch (error) {
-    console.error('❌ Error in full exam handler:', error.message);
-    await bot.sendMessage(chatId, '❌ Full Examni ochishda xatolik yuz berdi. Iltimos, qayta urinib ko\'ring.');
-  }
-});
-
-bot.onText(/👨‍💻 Admin bilan bog'lanish/, async (msg) => {
-  const chatId = msg.chat.id;
-  try {
-    const adminInfo =
-      `👨‍💻 *Admin ma'lumotlari*\n\n` +
-      `👤 *Ism familiya:* Akobir Norqulov\n` +
-      `📱 *Telefon raqami:* +998 88 128 33 43\n` +
-      `🔗 *Telegram username:* @developerslar\n\n` +
-      `📞 *Admin bilan bog'lanish uchun:* [Telegram orqali yozish](https://t.me/developerslar)`;
-
-    await bot.sendMessage(chatId, adminInfo, {
-      parse_mode: 'Markdown',
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: '📤 Admin ga yozish', url: 'https://t.me/developerslar' }]
-        ]
-      }
-    });
-  } catch (error) {
-    console.error('❌ Error in admin handler:', error.message);
-    await bot.sendMessage(chatId, '❌ Admin bilan bog\'lanishda xatolik yuz berdi.');
-  }
-});
-
-bot.onText(/🔗 Dostlarga ulashish/, async (msg) => {
-  const chatId = msg.chat.id;
-  try {
-    const shareText =
-      `🎯 Ajoyib imkoniyat! Ushbu bot orqali:\n\n` +
-      `🧪 Testni boshlash\n🗣️ Speaking\n✍️ Writing\n📚 Full Exam\n` +
-      `👨‍💻 Admin bilan bog'lanish\n\nBotdan foydalanish uchun: ${BOT_USERNAME}`;
-
-    await bot.sendMessage(chatId, '📤 *Ulashish uchun quyidagi tugmani bosing:*', {
-      parse_mode: 'Markdown',
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: '📤 Ulashish', url: `https://t.me/share/url?url=${encodeURIComponent(shareText)}` }]
-        ]
-      }
-    });
-  } catch (error) {
-    console.error('❌ Error in share handler:', error.message);
-    await bot.sendMessage(chatId, '❌ Ulashishda xatolik yuz berdi.');
-  }
-});
-
-bot.onText(/❓ Yordam/, async (msg) => {
-  const chatId = msg.chat.id;
-  try {
-    const helpText =
-      `🤖 *Bot haqida ma'lumot*\n\n` +
-      `Bu bot sizga quyidagi imkoniyatlarni beradi:\n\n` +
-      `🧪 *Testni boshlash* - Testlar yechish\n` +
-      `🗣️ *Speaking* - Gapirish mashqlari\n` +
-      `✍️ *Writing* - Yozish mashqlari\n` +
-      `📚 *Full Exam* - To'liq imtihonlar\n` +
-      `👨‍💻 *Admin* - Admin bilan bog'lanish\n` +
-      `🔗 *Ulashish* - Dostlarga ulashish\n\n` +
-      `Botdan foydalanish uchun pastdagi tugmalardan foydalaning!`;
-
-    await bot.sendMessage(chatId, helpText, { parse_mode: 'Markdown' });
-  } catch (error) {
-    console.error('❌ Error in help handler:', error.message);
-    await bot.sendMessage(chatId, '❌ Yordam ko\'rsatishda xatolik yuz berdi.');
-  }
-});
-
-// ─────────────────────────────────────────
-// CALLBACK QUERY HANDLER
-// ─────────────────────────────────────────
-
-bot.on('callback_query', async (callbackQuery) => {
-  const chatId = callbackQuery.message.chat.id;
-  const data = callbackQuery.data;
-  
-  try {
-    await bot.answerCallbackQuery(callbackQuery.id);
-
-    if (data === 'share_friends') {
-      const shareText =
-        `🎯 Ajoyib imkoniyat! Ushbu bot orqali:\n\n` +
-        `🧪 Testni boshlash\n🗣️ Speaking\n✍️ Writing\n📚 Full Exam\n` +
-        `👨‍💻 Admin bilan bog'lanish\n\nBotdan foydalanish uchun: ${BOT_USERNAME}`;
-
-      await bot.sendMessage(chatId, shareText, {
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: '📤 Ulashish', url: `https://t.me/share/url?url=${encodeURIComponent(shareText)}` }]
-          ]
+    const chatId = msg.chat.id;
+    
+    try {
+        const helpMessage = 
+            `🤖 *Bot haqida yordam*\n\n` +
+            `Bu bot CEFR imtihonini o'tkazish uchun ishlab chiqilgan. Botdan to'liq foydalanish uchun quyidagi qadamlarni bajaring:\n\n` +
+            `📋 *Asosiy funksiyalar:*\n\n` +
+            `📝 *Testni topshirish* - CEFR imtihonini topshirish uchun mini-ilovani ochish\n` +
+            `🔗 *Dostlarga ulashish* - Botni do'stlaringizga ulashish\n` +
+            `✍️ *Writinglap* - Yozish mahoratini oshirish (7 ta inson taklif qiling)\n` +
+            `🎤 *Speaklap* - Speaking mahoratini oshirish (7 ta inson taklif qiling)\n` +
+            `👨‍💻 *Admin bilan bog'lanish* - Admin bilan bog'lanish\n\n` +
+            `📺 *Majburiy talab:*\n` +
+            `Botdan foydalanish uchun @studyneedfuture kanaliga obuna bo'lish shart.\n\n` +
+            `🎯 *Qo'shimcha imkoniyatlar:*\n` +
+            `• Referral system - do'stlaringizni taklif qiling\n` +
+            `• Mini-app lar - Writinglap va Speaklap\n` +
+            `• Real vaqtda status tekshirish\n\n` +
+            `📞 *Yordam kerak bo'lsa:*\n` +
+            `Admin bilan bog'laning: ${ADMIN_INFO.telegram}\n\n` +
+            `🔗 *Boshlash uchun:* /start`;
+        
+        await bot.sendMessage(chatId, helpMessage, {
+            parse_mode: 'Markdown',
+            reply_markup: {
+                inline_keyboard: [[
+                    {
+                        text: '🚀 Boshlash',
+                        callback_data: 'start_menu'
+                    },
+                    {
+                        text: '📞 Admin bilan bog\'lanish',
+                        callback_data: 'contact_admin'
+                    }
+                ]]
+            }
+        });
+    } catch (error) {
+        if (error.response && error.response.body.error_code === 403) {
+            console.log(`🚫 Foydalanuvchi ${chatId} botni bloklagan`);
+        } else {
+            console.error('Xatolik (help):', error.message);
         }
-      });
     }
-  } catch (error) {
-    console.error('❌ Error in callback query handler:', error.message);
-  }
 });
 
-// ─────────────────────────────────────────
-// ERROR HANDLERS
-// ─────────────────────────────────────────
+// Handle /start command
+bot.onText(/\/start(.*)/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    const referrerId = match[1] ? match[1].trim() : null;
+    
+    // Check subscription first
+    const isSubscribed = await checkSubscription(userId);
+    
+    if (!isSubscribed) {
+        sendSubscriptionMessage(chatId);
+        return;
+    }
+    
+    // Handle referral
+    if (referrerId && referrerId !== userId.toString()) {
+        const isNewReferral = addReferral(referrerId, userId.toString());
+        
+        if (isNewReferral) {
+            try {
+                // Notify referrer
+                const referrerCount = await getUserReferralCount(referrerId);
+                await bot.sendMessage(referrerId, 
+                    `🎉 *Yangi taklif!*\n\n` +
+                    `Sizning referral linkingiz orqali yangi foydalanuvchi kanalga qo'shildi!\n\n` +
+                    `📊 *Sizning takliflaringiz:* ${referrerCount}/7\n` +
+                    `🎯 *Qolgan:* ${7 - referrerCount} ta\n\n` +
+                    `${referrerCount >= 5 ? '🎉 Barcha mini-app lar ochilgan!' : '🔒 Mini-app larni ochish uchun yana ' + (5 - referrerCount) + ' ta inson taklif qiling.'}`, 
+                    {
+                        parse_mode: 'Markdown',
+                        reply_markup: {
+                            inline_keyboard: [[
+                                {
+                                    text: '📊 Statusni tekshirish',
+                                    callback_data: 'check_status'
+                                }
+                            ]]
+                        }
+                    }
+                );
+            } catch (error) {
+                console.log('Referrerga xabar yuborishda xatolik:', error.message);
+            }
+        }
+    }
+    
+    sendMainMenu(chatId);
+});
 
+// Handle callback queries
+bot.on('callback_query', async (callbackQuery) => {
+    const chatId = callbackQuery.message.chat.id;
+    const userId = callbackQuery.from.id;
+    const data = callbackQuery.data;
+
+    // Answer callback query
+    bot.answerCallbackQuery(callbackQuery.id);
+
+    if (data === 'check_subscription') {
+        const isSubscribed = await checkSubscription(userId);
+        
+        if (isSubscribed) {
+            try {
+                await bot.sendMessage(chatId, '✅ Obuna tasdiqlandi! Botdan foydalanishingiz mumkin.');
+                await sendMainMenu(chatId);
+            } catch (error) {
+                if (error.response && error.response.body.error_code === 403) {
+                    console.log(`🚫 Foydalanuvchi ${chatId} botni bloklagan`);
+                } else {
+                    console.error('Xatolik (check_subscription):', error.message);
+                }
+            }
+        } else {
+            try {
+                await bot.sendMessage(chatId, '❌ Siz hali kanalga obuna bo\'lmagansiz. Iltimos, avval obuna bo\'ling!');
+            } catch (error) {
+                if (error.response && error.response.body.error_code === 403) {
+                    console.log(`🚫 Foydalanuvchi ${chatId} botni bloklagan`);
+                } else {
+                    console.error('Xatolik (check_subscription false):', error.message);
+                }
+            }
+        }
+    } else if (data === 'share_bot') {
+        try {
+            const botInfo = await bot.getMe();
+            const shareText = `🤖 Qiziqarli botni topdim\\! Test topshirish, o\\'rganish va ko\\'p narsalar uchun ajoyib imkoniyatlar\\.\n\nBot linki: https://t\\.me/${botInfo.username}`;
+            
+            // Contactlardan ulashish uchun inline keyboard
+            await bot.sendMessage(chatId, 
+                `🔗 Do'stlaringizga ulashing:\n\n${shareText.replace(/\\/g, '')}\n\n👇 Quyidagi tugmalardan birini tanlang:`, 
+                {
+                    reply_markup: {
+                        inline_keyboard: [
+                            [
+                                {
+                                    text: '📱 Contactdan tanlash',
+                                    switch_inline_query: shareText.replace(/\\/g, '')
+                                }
+                            ],
+                            [
+                                {
+                                    text: '📋 Matnni nusxa olish',
+                                    callback_data: 'copy_share_text'
+                                }
+                            ]
+                        ]
+                    }
+                }
+            );
+        } catch (error) {
+            if (error.response && error.response.body.error_code === 403) {
+                console.log(`🚫 Foydalanuvchi ${chatId} botni bloklagan`);
+            } else {
+                console.error('Xatolik (share_bot):', error.message);
+            }
+        }
+    } else if (data === 'copy_share_text') {
+        try {
+            const botInfo = await bot.getMe();
+            const shareText = `🤖 Qiziqarli kanalni topdim\\! CEFR imtihonini topshirish, o'rganish va Speaking Writing uchun zor kanal ekan, qoshilib olgin tez !\\.\\n\\nBot linki: https://t\\.me/${botInfo.username}`;
+            
+            await bot.sendMessage(chatId, '📋 Matn nusxalandi! Endi uni do\'stlaringizga yuborishingiz mumkin.');
+        } catch (error) {
+            if (error.response && error.response.body.error_code === 403) {
+                console.log(`🚫 Foydalanuvchi ${chatId} botni bloklagan`);
+            } else {
+                console.error('Xatolik (copy_share_text):', error.message);
+            }
+        }
+    } else if (data === 'writinglap_status') {
+        try {
+            const referralCount = await getUserReferralCount(chatId);
+            const botInfo = await bot.getMe();
+            const referralLink = `https://t.me/${botInfo.username}?start=${chatId}`;
+            
+            if (referralCount >= 5) {
+                await bot.sendMessage(chatId, '✅ Writinglap ochilgan! Platformadan foydalanishingiz mumkin.', {
+                    reply_markup: {
+                        inline_keyboard: [[
+                            {
+                                text: '✍️ Writinglapni ochish',
+                                web_app: { url: WRITINGLAP_URL }
+                            }
+                        ]]
+                    }
+                });
+            } else {
+                await bot.sendMessage(chatId, 
+                    `🔒 Writinglap qulfi\n\n` +
+                    `Bu platformadan foydalanish uchun @studyneedfuture kanaliga 7 ta inson taklif qilishingiz kerak.\n\n` +
+                    `📊 Sizning takliflaringiz: ${referralCount}/7\n` +
+                    `🎯 Qolgan: ${7 - referralCount} ta\n\n` +
+                    `🔗 Sizning referral linkingiz:\n${referralLink}\n\n` +
+                    `📋 Ushbu linkni do\'stlaringizga yuboring va ular kanalga obuna bo\'lishlarini so\'rang!`, 
+                    {
+                        reply_markup: {
+                            inline_keyboard: [
+                                [
+                                    {
+                                        text: '📋 Linkni nusxa olish',
+                                        callback_data: 'copy_referral_link'
+                                    }
+                                ],
+                                [
+                                    {
+                                        text: '🔄 Statusni tekshirish',
+                                        callback_data: 'writinglap_status'
+                                    }
+                                ]
+                            ]
+                        }
+                    }
+                );
+            }
+        } catch (error) {
+            if (error.response && error.response.body.error_code === 403) {
+                console.log(`🚫 Foydalanuvchi ${chatId} botni bloklagan`);
+            } else {
+                console.error('Xatolik (writinglap_status):', error.message);
+            }
+        }
+    } else if (data === 'speaklap_status') {
+        try {
+            const referralCount = await getUserReferralCount(chatId);
+            const botInfo = await bot.getMe();
+            const referralLink = `https://t.me/${botInfo.username}?start=${chatId}`;
+            
+            if (referralCount >= 5) {
+                await bot.sendMessage(chatId, '✅ Speaklap ochilgan! Platformadan foydalanishingiz mumkin.', {
+                    reply_markup: {
+                        inline_keyboard: [[
+                            {
+                                text: '🎤 Speaklapni ochish',
+                                web_app: { url: SPEAKLAP_URL }
+                            }
+                        ]]
+                    }
+                });
+            } else {
+                await bot.sendMessage(chatId, 
+                    `🔒 Speaklap qulfi\n\n` +
+                    `Bu platformadan foydalanish uchun @studyneedfuture kanaliga 7 ta inson taklif qilishingiz kerak.\n\n` +
+                    `📊 Sizning takliflaringiz: ${referralCount}/7\n` +
+                    `🎯 Qolgan: ${7 - referralCount} ta\n\n` +
+                    `🔗 Sizning referral linkingiz:\n${referralLink}\n\n` +
+                    `📋 Ushbu linkni do\'stlaringizga yuboring va ular kanalga obuna bo\'lishlarini so\'rang!`, 
+                    {
+                        reply_markup: {
+                            inline_keyboard: [
+                                [
+                                    {
+                                        text: '📋 Linkni nusxa olish',
+                                        callback_data: 'copy_referral_link'
+                                    }
+                                ],
+                                [
+                                    {
+                                        text: '🔄 Statusni tekshirish',
+                                        callback_data: 'speaklap_status'
+                                    }
+                                ]
+                            ]
+                        }
+                    }
+                );
+            }
+        } catch (error) {
+            if (error.response && error.response.body.error_code === 403) {
+                console.log(`🚫 Foydalanuvchi ${chatId} botni bloklagan`);
+            } else {
+                console.error('Xatolik (speaklap_status):', error.message);
+            }
+        }
+    } else if (data === 'copy_referral_link') {
+        try {
+            const botInfo = await bot.getMe();
+            const referralLink = `https://t.me/${botInfo.username}?start=${chatId}`;
+            
+            await bot.sendMessage(chatId, '📋 *Referral link nusxalandi!* Endi uni do\'stlaringizga yuborishingiz mumkin.');
+        } catch (error) {
+            if (error.response && error.response.body.error_code === 403) {
+                console.log(`🚫 Foydalanuvchi ${chatId} botni bloklagan`);
+            } else {
+                console.error('Xatolik (copy_referral_link):', error.message);
+            }
+        }
+    } else if (data === 'check_status') {
+        try {
+            const hasInvitedEnough = await checkInvitationRequirement(chatId);
+            
+            if (hasInvitedEnough) {
+                await bot.sendMessage(chatId, 
+                    `✅ *Tabriklayman!*\n\n` +
+                    `Siz @studyneedfuture kanaliga yetarlicha inson taklif qildingiz!\n\n` +
+                    `🎉 Endi barcha xususiyatlar ochiq:\n` +
+                    `✍️ Writinglap - Yozish mahoratini oshirish\n` +
+                    `🎤 Speaklap - Speaking mahoratini oshirish\n\n` +
+                    `👇 Asosiy menyu yangilandi:`, 
+                    {
+                        parse_mode: 'Markdown'
+                    }
+                );
+                await sendMainMenu(chatId);
+            } else {
+                await bot.sendMessage(chatId, 
+                    `⏳ *Hali tayyor emas*\n\n` +
+                    `@studyneedfuture kanaliga hali yetarlicha inson taklif qilinmagan.\n\n` +
+                    `📊 *Qilingan ish:*\n` +
+                    `🔗 Do'stlaringizga ulashishda davom eting\n` +
+                    `📱 Kanalga 7 ta inson taklif qiling\n\n` +
+                    `💡 *Maslahat:* Do'stlaringizga kanalning foydaliligini tushuntiring!`, 
+                    {
+                        parse_mode: 'Markdown',
+                        reply_markup: {
+                            inline_keyboard: [[
+                                {
+                                    text: '🔗 Do\'stlarga ulashish',
+                                    callback_data: 'share_bot'
+                                }
+                            ]]
+                        }
+                    }
+                );
+            }
+        } catch (error) {
+            if (error.response && error.response.body.error_code === 403) {
+                console.log(`🚫 Foydalanuvchi ${chatId} botni bloklagan`);
+            } else {
+                console.error('Xatolik (check_status):', error.message);
+            }
+        }
+    } else if (data === 'contact_admin') {
+        try {
+            const adminMessage = 
+                `👨‍💻 *Admin ma\'lumotlari:*\n\n` +
+                `👤 *Ism familiya:* ${ADMIN_INFO.name}\n` +
+                `📞 *Telefon:* ${ADMIN_INFO.phone}\n` +
+                `📱 *Telegram:* ${ADMIN_INFO.telegram}\n\n` +
+                `Agar savollaringiz bo'lsa, admin bilan bog'lanishingiz mumkin!`;
+            
+            await bot.sendMessage(chatId, adminMessage, {
+                parse_mode: 'Markdown',
+                reply_markup: {
+                    inline_keyboard: [[
+                        {
+                            text: '📱 Telegram\'da yozish',
+                            url: ADMIN_INFO.telegram
+                        }
+                    ]]
+                }
+            });
+        } catch (error) {
+            if (error.response && error.response.body.error_code === 403) {
+                console.log(`🚫 Foydalanuvchi ${chatId} botni bloklagan`);
+            } else {
+                console.error('Xatolik (contact_admin):', error.message);
+            }
+        }
+    }
+});
+
+// Handle inline queries for sharing with contacts
+bot.on('inline_query', async (query) => {
+    const queryId = query.id;
+    const userId = query.from.id;
+    
+    try {
+        const botInfo = await bot.getMe();
+        const shareText = `🤖 Qiziqarli botni topdim\\! Test topshirish, o'rganish va ko'p narsalar uchun ajoyib imkoniyatlar\\.\\n\\nBot linki: https://t\\.me/${botInfo.username}`;
+        
+        const results = [
+            {
+                type: 'article',
+                id: 'share_bot',
+                title: '🤖 Telegram Botni ulashish',
+                description: 'Test topshirish va o\'rganish uchun ajoyib bot',
+                input_message_content: {
+                    message_text: shareText,
+                    parse_mode: 'MarkdownV2'
+                },
+                reply_markup: {
+                    inline_keyboard: [[
+                        {
+                            text: '🚀 Botni ochish',
+                            url: `https://t.me/${botInfo.username}`
+                        },
+                        {
+                            text: '📞 Admin bilan bog\'lanish',
+                            url: ADMIN_INFO.telegram
+                        },
+                        {
+                            text: '✍️ Writinglap',
+                            url: WRITINGLAP_URL
+                        },
+                        {
+                            text: '🎤 Speaklap',
+                            url: SPEAKLAP_URL
+                        }
+                    ]]
+                },
+                thumb_url: 'https://cdn-icons-png.flaticon.com/512/4080/4080896.png'
+            }
+        ];
+        
+        await bot.answerInlineQuery(queryId, results, {
+            cache_time: 0
+        });
+        
+    } catch (error) {
+        console.error('Inline query xatolik:', error.message);
+    }
+});
+
+// Webhook setup for production
+if (NODE_ENV === 'production') {
+    // Webhook endpoint
+    app.post('/webhook', (req, res) => {
+        bot.processUpdate(req.body);
+        res.sendStatus(200);
+    });
+
+    // Set webhook
+    bot.setWebHook(WEBHOOK_URL).then(() => {
+        console.log('✅ Webhook o\'rnatildi:', WEBHOOK_URL);
+    }).catch(error => {
+        console.error('❌ Webhook o\'rnatishda xatolik:', error);
+    });
+}
+
+// Error handling
 bot.on('polling_error', (error) => {
-  console.error('❌ Polling error:', error.message);
+    console.error('Polling error:', error);
 });
 
-bot.on('webhook_error', (error) => {
-  console.error('❌ Webhook error:', error.message);
+// Health check endpoint
+app.get('/health', (req, res) => {
+    res.status(200).json({ 
+        status: 'OK', 
+        mode: NODE_ENV === 'production' ? 'webhook' : 'polling',
+        timestamp: new Date().toISOString()
+    });
 });
 
-// Global error handlers
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
-});
-
-process.on('uncaughtException', (error) => {
-  console.error('❌ Uncaught Exception:', error);
-  process.exit(1);
-});
-
-console.log('🤖 Bot initialization complete...');
+// Start server for webhook mode
+if (NODE_ENV === 'production') {
+    app.listen(PORT, () => {
+        console.log('🚀 Server ishga tushdi, port:', PORT);
+        console.log(`📺 Majburiy kanal: ${CHANNEL_USERNAME}`);
+        console.log(`👨‍💻 Admin: ${ADMIN_INFO.name}`);
+        console.log(`🔗 Webhook: ${WEBHOOK_URL}`);
+    });
+} else {
+    console.log('🤖 Bot ishga tushdi (Polling mode)!');
+    console.log(`📺 Majburiy kanal: ${CHANNEL_USERNAME}`);
+    console.log(`👨‍💻 Admin: ${ADMIN_INFO.name}`);
+}
