@@ -31,7 +31,7 @@ CHANNEL_USERNAME=@your_channel
 ADMIN_NAME=Your Name
 ADMIN_PHONE=+998901234567
 ADMIN_TELEGRAM=https://t.me/your_username
-WEBHOOK_URL=https://your-app.onrender.com/webhook
+WEBHOOK_URL=https://your-app.onrender.com
 PORT=3000
 NODE_ENV=development  # local uchun, serverda "production"
 ```
@@ -72,8 +72,11 @@ Render yoki boshqa platformaga yuklashdan oldin:
    - `NODE_ENV=production`
    - `BOT_TOKEN=your_token`
    - `CHANNEL_USERNAME=@your_channel`
-   - `WEBHOOK_URL=https://your-app.onrender.com/webhook`
-   - Boshqa kerakli variables
+   - `WEBHOOK_URL=https://your-app.onrender.com`
+   - `ADMIN_NAME=Your Name`
+   - `ADMIN_PHONE=+998901234567`
+   - `ADMIN_TELEGRAM=https://t.me/your_username`
+   - `PORT=3000` (Render o'z portini beradi, lekin bu kerak)
 
 ## Bot funksiyalari
 
